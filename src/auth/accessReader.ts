@@ -1,4 +1,5 @@
-import { Contract, getAddress, isAddress, type ContractRunner } from "ethers";
+import { Contract, getAddress, isAddress, type Provider } from "ethers";
+import { createChainGuard } from "./chainGuard.js";
 import { AuthError } from "./errors.js";
 
 /** Answers "does this wallet currently have access to this plan?". */
@@ -11,14 +12,25 @@ export const ACCESS_REGISTRY_READ_ABI = [
   "function hasAccess(address user, uint256 planId) view returns (bool)",
 ] as const;
 
+export interface ContractAccessReaderOptions {
+  /**
+   * Chain the registry is deployed on. The first read checks that the provider reports this chain
+   * id and fails closed (the service turns that into ACCESS_CHECK_FAILED) if it does not. Use the
+   * same value as `AuthConfig.chainId`.
+   */
+  chainId: number;
+}
+
 const MAX_UINT256 = (1n << 256n) - 1n;
 
 /** Reads `AccessRegistry.hasAccess` over any ethers provider. The result reflects the latest block. */
 export class ContractAccessReader implements AccessReader {
   readonly #registry: Contract;
+  readonly #assertChain: () => Promise<void>;
 
-  constructor(registryAddress: string, provider: ContractRunner) {
+  constructor(registryAddress: string, provider: Provider, options: ContractAccessReaderOptions) {
     if (!isAddress(registryAddress)) throw new AuthError("INVALID_CONFIG", "registry address is not an address");
+    this.#assertChain = createChainGuard(provider, options.chainId);
     this.#registry = new Contract(getAddress(registryAddress), ACCESS_REGISTRY_READ_ABI, provider);
   }
 
@@ -27,6 +39,7 @@ export class ContractAccessReader implements AccessReader {
     if (typeof planId !== "bigint" || planId < 0n || planId > MAX_UINT256) {
       throw new AuthError("INVALID_PLAN", "planId must be a uint256");
     }
+    await this.#assertChain();
     const allowed: unknown = await this.#registry.getFunction("hasAccess")(getAddress(user), planId);
     return allowed === true;
   }

@@ -103,9 +103,9 @@ describe("wallet login: createChallenge", () => {
 
   it("never repeats a nonce", async () => {
     const { service } = setup();
-    const { address } = Wallet.createRandom();
+    const addresses = Array.from({ length: 200 }, () => `0x${randomBytes(20).toString("hex")}`);
     const nonces = new Set<string>();
-    for (let i = 0; i < 200; i++) nonces.add((await service.createChallenge(address)).nonce);
+    for (const address of addresses) nonces.add((await service.createChallenge(address)).nonce);
     expect(nonces.size).to.equal(200);
   });
 
@@ -116,6 +116,42 @@ describe("wallet login: createChallenge", () => {
     const { address } = Wallet.createRandom();
     await service.createChallenge(address);
     await expectAuthError(() => service.createChallenge(address), "STORE_FULL");
+  });
+
+  it("limits live challenges per address, so one wallet cannot fill the store", async () => {
+    const clock = new TestClock(START);
+    const store = new InMemoryNonceStore({ maxPerAddress: 2, now: () => clock.now().getTime() });
+    const { service } = setup({ nonceStore: store, now: clock.now });
+    const { address } = Wallet.createRandom();
+    await service.createChallenge(address);
+    await service.createChallenge(address);
+    await expectAuthError(() => service.createChallenge(address), "TOO_MANY_CHALLENGES");
+    // A different wallet is unaffected, and the quota comes back when challenges expire.
+    await service.createChallenge(Wallet.createRandom().address);
+    clock.advanceSeconds(300);
+    await service.createChallenge(address);
+  });
+
+  it("limits live challenges per client key when the caller provides one", async () => {
+    const clock = new TestClock(START);
+    const store = new InMemoryNonceStore({ maxPerClient: 2, now: () => clock.now().getTime() });
+    const { service } = setup({ nonceStore: store, now: clock.now });
+    await service.createChallenge(Wallet.createRandom().address, { clientKey: "203.0.113.7" });
+    await service.createChallenge(Wallet.createRandom().address, { clientKey: "203.0.113.7" });
+    await expectAuthError(
+      () => service.createChallenge(Wallet.createRandom().address, { clientKey: "203.0.113.7" }),
+      "TOO_MANY_CHALLENGES",
+    );
+    await service.createChallenge(Wallet.createRandom().address, { clientKey: "203.0.113.8" });
+    await service.createChallenge(Wallet.createRandom().address); // no key, no client quota
+  });
+
+  it("rejects an invalid client key", async () => {
+    const { service } = setup();
+    const { address } = Wallet.createRandom();
+    for (const clientKey of ["", "x".repeat(129), 7 as unknown as string]) {
+      await expectAuthError(() => service.createChallenge(address, { clientKey }), "INVALID_CONFIG");
+    }
   });
 });
 

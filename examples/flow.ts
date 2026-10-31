@@ -56,7 +56,7 @@ const service: AuthService = createAuthService(
     nonceStore: new InMemoryNonceStore(),
     // Generated for this run. A real service loads a stable secret from its secret manager.
     sessionSecret: randomBytes(32),
-    accessReader: new ContractAccessReader(registryAddress, ethers.provider),
+    accessReader: new ContractAccessReader(registryAddress, ethers.provider, { chainId: 31337 }),
   },
 );
 console.log("auth service ready (chain id 31337, domain app.example.com)");

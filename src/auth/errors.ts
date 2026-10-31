@@ -20,6 +20,8 @@ export type AuthErrorCode =
   | "MESSAGE_MISMATCH"
   | "INVALID_SIGNATURE"
   | "STORE_FULL"
+  | "TOO_MANY_CHALLENGES"
+  | "VERIFIER_UNAVAILABLE"
   // session token
   | "TOKEN_MALFORMED"
   | "TOKEN_INVALID_SIGNATURE"

@@ -70,8 +70,13 @@ export interface AccessGrant {
   chainId: number;
 }
 
+export interface ChallengeOptions {
+  clientKey?: string;
+}
+
 export interface AuthService {
-  createChallenge(address: string): Promise<Challenge>;
+  /** `options.clientKey` (typically the client IP) enables the per-client challenge quota of the nonce store. */
+  createChallenge(address: string, options?: ChallengeOptions): Promise<Challenge>;
   verifyLogin(input: { message: string; signature: string }): Promise<VerifiedLogin>;
   issueSession(login: VerifiedLogin): Session;
   requireAccess(input: { token: string; planId: bigint }): Promise<AccessGrant>;
@@ -105,9 +110,13 @@ export function createAuthService(config: AuthConfig, deps: AuthDeps): AuthServi
   const nowSeconds = () => Math.floor(now().getTime() / 1000);
 
   return {
-    async createChallenge(address) {
+    async createChallenge(address, options) {
       if (typeof address !== "string" || !isAddress(address)) {
         throw new AuthError("INVALID_ADDRESS", "address must be a valid Ethereum address");
+      }
+      const clientKey = options?.clientKey;
+      if (clientKey !== undefined && (typeof clientKey !== "string" || clientKey.length === 0 || clientKey.length > 128)) {
+        throw new AuthError("INVALID_CONFIG", "clientKey must be a non-empty string of at most 128 characters");
       }
       const checksummed = getAddress(address);
 
@@ -121,7 +130,13 @@ export function createAuthService(config: AuthConfig, deps: AuthDeps): AuthServi
       const expirationTime = new Date(expiresMs).toISOString();
 
       const message = formatMessage(baseMessage(config, checksummed, nonce, issuedAt, expirationTime));
-      await deps.nonceStore.issue(nonce, { address: checksummed, issuedAt, expirationTime, expiresAtMs: expiresMs });
+      await deps.nonceStore.issue(nonce, {
+        address: checksummed,
+        issuedAt,
+        expirationTime,
+        expiresAtMs: expiresMs,
+        ...(clientKey !== undefined ? { clientKey } : {}),
+      });
       return { message, nonce, issuedAt, expirationTime };
     },
 

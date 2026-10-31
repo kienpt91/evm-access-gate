@@ -29,8 +29,10 @@ function buildService(registryAddress: string, withErc1271: boolean): AuthServic
   return createAuthService(CONFIG, {
     nonceStore: new InMemoryNonceStore(),
     sessionSecret: randomBytes(32),
-    accessReader: new ContractAccessReader(registryAddress, ethers.provider),
-    ...(withErc1271 ? { contractSignatureVerifier: createErc1271Verifier(ethers.provider) } : {}),
+    accessReader: new ContractAccessReader(registryAddress, ethers.provider, { chainId: CONFIG.chainId }),
+    ...(withErc1271
+      ? { contractSignatureVerifier: createErc1271Verifier(ethers.provider, { chainId: CONFIG.chainId }) }
+      : {}),
     now: clock.now,
   });
 }
@@ -191,6 +193,85 @@ describe("end to end: wallet login and on-chain access", () => {
     await expectAuthError(() => service.requireAccess({ token, planId: 1n }), "ACCESS_CHECK_FAILED");
   });
 
+  it("fails closed when the provider is on a different chain than the configuration", async () => {
+    const { registry, alice, registryAddress } = await loadFixture(deployStack);
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
+
+    const reader = new ContractAccessReader(registryAddress, ethers.provider, { chainId: 1 });
+    await expectAuthError(() => reader.hasAccess(alice.address, 1n), "CHAIN_ID_MISMATCH");
+
+    // Through the service the mismatch can never turn into access, even though the user paid.
+    const service = createAuthService(CONFIG, {
+      nonceStore: new InMemoryNonceStore(),
+      sessionSecret: randomBytes(32),
+      accessReader: reader,
+    });
+    const token = await signIn(service, alice);
+    await expectAuthError(() => service.requireAccess({ token, planId: 1n }), "ACCESS_CHECK_FAILED");
+  });
+
+  it("the ERC-1271 verifier refuses a provider on another chain", async () => {
+    const { alice } = await loadFixture(deployStack);
+    const verifier = createErc1271Verifier(ethers.provider, { chainId: 1 });
+    await expectAuthError(() => verifier.isValidSignature(alice.address, "hello", "0x1234"), "CHAIN_ID_MISMATCH");
+  });
+
+  describe("hostile ERC-1271 wallets", () => {
+    const BurnGas = 0;
+    const ReturnLarge = 1;
+    const Revert = 2;
+
+    it("the burning wallet really does exhaust whatever gas it is given", async () => {
+      const hostile = await ethers.deployContract("HostileWallet", [BurnGas]);
+      const data = hostile.interface.encodeFunctionData("isValidSignature", [ethers.ZeroHash, "0x"]);
+      let failure: unknown;
+      try {
+        await ethers.provider.call({ to: await hostile.getAddress(), data, gasLimit: 300_000n });
+      } catch (err) {
+        failure = err;
+      }
+      expect(failure).to.be.instanceOf(Error);
+      expect(String(failure)).to.match(/out of gas/i);
+    });
+
+    it("a wallet that burns all its gas is cut off at the gas limit and counts as an invalid signature", async () => {
+      const { alice, service } = await loadFixture(deployStack);
+      const hostile = await ethers.deployContract("HostileWallet", [BurnGas]);
+      const challenge = await service.createChallenge(await hostile.getAddress());
+
+      const started = Date.now();
+      await expectAuthError(
+        async () =>
+          service.verifyLogin({ message: challenge.message, signature: await alice.signMessage(challenge.message) }),
+        "INVALID_SIGNATURE",
+      );
+      // 300,000 gas of hashing takes a few milliseconds; the node's own cap would be 100x larger.
+      expect(Date.now() - started).to.be.lessThan(2000);
+    });
+
+    it("a wallet that returns far more than a bytes4 is rejected before decoding", async () => {
+      const { alice, service } = await loadFixture(deployStack);
+      const hostile = await ethers.deployContract("HostileWallet", [ReturnLarge]);
+      const challenge = await service.createChallenge(await hostile.getAddress());
+      await expectAuthError(
+        async () =>
+          service.verifyLogin({ message: challenge.message, signature: await alice.signMessage(challenge.message) }),
+        "INVALID_SIGNATURE",
+      );
+    });
+
+    it("a wallet that reverts counts as an invalid signature", async () => {
+      const { alice, service } = await loadFixture(deployStack);
+      const hostile = await ethers.deployContract("HostileWallet", [Revert]);
+      const challenge = await service.createChallenge(await hostile.getAddress());
+      await expectAuthError(
+        async () =>
+          service.verifyLogin({ message: challenge.message, signature: await alice.signMessage(challenge.message) }),
+        "INVALID_SIGNATURE",
+      );
+    });
+  });
+
   it("the hand-written read ABI matches the compiled contract", async () => {
     const { registry } = await loadFixture(deployStack);
     const reader = new Interface(ACCESS_REGISTRY_READ_ABI).getFunction("hasAccess");
@@ -201,8 +282,9 @@ describe("end to end: wallet login and on-chain access", () => {
 
   it("ContractAccessReader validates its inputs", async () => {
     const { alice, registryAddress } = await loadFixture(deployStack);
-    expect(() => new ContractAccessReader("0x1234", ethers.provider)).to.throw(/INVALID_CONFIG/);
-    const reader = new ContractAccessReader(registryAddress, ethers.provider);
+    expect(() => new ContractAccessReader("0x1234", ethers.provider, { chainId: 31337 })).to.throw(/INVALID_CONFIG/);
+    expect(() => new ContractAccessReader(registryAddress, ethers.provider, { chainId: 0 })).to.throw(/INVALID_CONFIG/);
+    const reader = new ContractAccessReader(registryAddress, ethers.provider, { chainId: 31337 });
     await expectAuthError(() => reader.hasAccess("nope", 1n), "INVALID_ADDRESS");
     await expectAuthError(() => reader.hasAccess(alice.address, -1n), "INVALID_PLAN");
     await expectAuthError(() => reader.hasAccess(alice.address, 1n << 256n), "INVALID_PLAN");
