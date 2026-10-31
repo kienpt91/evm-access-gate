@@ -1,0 +1,9 @@
+node_modules/
+artifacts/
+cache/
+/types/
+coverage/
+cache_hardhat/
+.env
+.env.*
+*.log
