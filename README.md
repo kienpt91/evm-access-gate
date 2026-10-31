@@ -20,7 +20,7 @@ This is an **educational example project**.
 
 ```
 contracts/AccessRegistry.sol     the contract (OpenZeppelin AccessControl, Pausable, ReentrancyGuard)
-contracts/test/                  test-only contracts: ReentrantBuyer (attacker), Erc1271Wallet, AccessProbe
+contracts/test/                  test-only contracts: ReentrantBuyer (attacker), HostileWallet, Erc1271Wallet, AccessProbe
 src/auth/                        wallet login, session tokens, access check (no web framework)
 test/registry/                   contract tests
 test/auth/                       backend tests, including end-to-end tests against the contract
@@ -53,7 +53,7 @@ The npm scripts set `HARDHAT_DISABLE_TELEMETRY=true` using POSIX shell syntax, s
 | `createPlan(planId, price, duration, maxHolders)` | admin | New plan with an admin-chosen id. Rejects a duplicate id, zero price, zero duration and durations above 3650 days. `maxHolders = 0` means unlimited. |
 | `setPlanActive(planId, active)` | admin | Allow or stop new purchases. Existing access is untouched. |
 | `setPlanPrice(planId, price)` | admin | Applies to future purchases only; time already bought is never changed. |
-| `purchase(planId)` payable | anyone | Buy or extend access for `msg.sender`. |
+| `purchase(planId, maxPrice)` payable | anyone | Buy or extend access for `msg.sender`. Reverts with `PriceAboveMax` if the live price is above `maxPrice`. |
 | `grant(user, planId, duration, reason)` | operator | Free access, added like a purchase. `reason` is at most 140 bytes. |
 | `revoke(user, planId, reason)` | operator | Ends access now and frees the user's slot. No refund. |
 | `releaseExpired(planId, users[])` | anyone | Frees the capacity slots of lapsed holders (at most 50 addresses per call). |
@@ -61,17 +61,17 @@ The npm scripts set `HARDHAT_DISABLE_TELEMETRY=true` using POSIX shell syntax, s
 | `withdrawTo(to, amount)` | admin | Sends accrued revenue to `to`. |
 | `hasAccess(user, planId)`, `expiryOf(user, planId)`, `holdsSlot(user, planId)`, `getPlan(planId)` | view | |
 
-Every state change emits an event. Errors are custom errors (`PlanNotFound`, `PlanFull`, `InsufficientPayment`, `RefundFailed`, ...), so a client can decode them from the ABI.
+Every state change emits an event. Errors are custom errors (`PlanNotFound`, `PlanFull`, `InsufficientPayment`, `PriceAboveMax`, `RefundFailed`, ...), so a client can decode them from the ABI.
 
 ### Rules worth knowing
 
 **Time.** A purchase or grant adds the duration to `max(now, current expiry)`. Renewing early keeps the remaining time; renewing after a gap does not credit the gap. At `expiry == block.timestamp` access is already over. These boundaries are tested at the exact second.
 
-**Payment.** `purchase` accepts `msg.value >= price` and refunds the difference to the buyer in the same transaction. I chose refunding over rejecting overpayment so a client that rounds up does not fail. The refund is the one place the contract pushes ETH to an arbitrary address, so it is guarded with `ReentrancyGuard` and happens after all state updates. If the refund fails, the purchase reverts, which means a contract buyer that cannot receive ETH must pay the exact price.
+**Payment.** `purchase(planId, maxPrice)` first checks that the live price is not above `maxPrice`, then accepts `msg.value >= price` and refunds the difference to the buyer in the same transaction. The bound closes a race: the admin can change the price at any time, and without `maxPrice` a buyer who rounded up could be mined after a price increase and pay it. A client passes the price it showed to the user as `maxPrice` and may send that much (or more) as `msg.value`: if the price rose in the meantime the call reverts with `PriceAboveMax`, if it dropped the buyer pays the lower price and gets the rest back, and an exact-price buyer sees no change. The bound is only as good as the client's choice of `maxPrice`; passing `type(uint256).max` opts out of it. I chose refunding over rejecting overpayment so a client that rounds up does not fail. The refund is the one place the contract pushes ETH to an arbitrary address, so it is guarded with `ReentrancyGuard` and happens after all state updates. If the refund fails, the purchase reverts, which means a contract buyer that cannot receive ETH must send exactly the price.
 
 **Revenue.** Revenue is only accounted (`accruedRevenue`), never forwarded on purchase. The admin pulls it with `withdrawTo`, which checks `0 < amount <= accruedRevenue`, lowers the counter first, then sends. The contract has no `receive` or `fallback`, so a plain transfer reverts. ETH forced in by other means (for example from a self-destructing contract) is not counted and cannot be withdrawn.
 
-**Capacity.** For a plan with `maxHolders > 0`, a holder occupies a slot from their first purchase or grant until `revoke` or `releaseExpired`. Nothing runs on-chain when time passes, so an expired holder keeps the slot until someone calls `releaseExpired` for them. Until then `activeHolders` over-counts and a full plan can look full to newcomers. Operator grants count against the cap like purchases. For uncapped plans nothing is tracked.
+**Capacity.** For a plan with `maxHolders > 0`, a holder occupies a slot from their first purchase or grant until `revoke` or `releaseExpired`. Nothing runs on-chain when time passes, so an expired holder keeps the slot until someone calls `releaseExpired` for them. Until then `activeHolders` over-counts and a full plan can look full to newcomers. Operator grants count against the cap like purchases. For uncapped plans nothing is tracked. The cap is a hard limit on paying or granted holders, and price is the only thing that discourages one buyer, or several colluding buyers, from taking every slot for a whole period; there is no per-address limit. An operator can run a keeper that calls `releaseExpired` for lapsed holders.
 
 **Roles.** The contract inherits OpenZeppelin `AccessControlDefaultAdminRules`, a subclass of `AccessControl`. `DEFAULT_ADMIN_ROLE` has exactly one holder, cannot be handed out with `grantRole`, and moves in two steps with a delay (`beginDefaultAdminTransfer`, then `acceptDefaultAdminTransfer` after the delay; the delay is a constructor argument). `OPERATOR_ROLE` is managed by the admin; the admin does not hold it by default. One admin account does plan management, pausing and withdrawals, which is a simplification: a real deployment would split these roles and put the admin behind a multisig.
 
@@ -88,7 +88,7 @@ Every state change emits an event. Errors are custom errors (`PlanNotFound`, `Pl
 | Source pragma | `^0.8.24` |
 | OpenZeppelin Contracts | 5.6.1 |
 
-`npm run compile` prints `Compiled N Solidity files with solc 0.8.38 (evm target: cancun)`. The long version and settings are also stored in `artifacts/build-info/*.json`. Compiling through solc-js is slower than a native binary, which does not matter at this size. Hardhat's gas report lists a bytecode size of 9,143 bytes for `AccessRegistry`.
+`npm run compile` prints `Compiled N Solidity files with solc 0.8.38 (evm target: cancun)`. The long version and settings are also stored in `artifacts/build-info/*.json`. Compiling through solc-js is slower than a native binary, which does not matter at this size. Hardhat's gas report lists a bytecode size of 9,186 bytes for `AccessRegistry`.
 
 ## Backend: `src/auth/`
 
@@ -101,12 +101,12 @@ const service = createAuthService(
   {
     nonceStore: new InMemoryNonceStore(),
     sessionSecret,                                   // >= 32 bytes, from your secret manager
-    accessReader: new ContractAccessReader(registryAddress, provider),
-    contractSignatureVerifier: createErc1271Verifier(provider), // optional
+    accessReader: new ContractAccessReader(registryAddress, provider, { chainId: 31337 }),
+    contractSignatureVerifier: createErc1271Verifier(provider, { chainId: 31337 }), // optional
   },
 );
 
-const { message } = await service.createChallenge(address);        // 1. send `message` to the wallet
+const { message } = await service.createChallenge(address, { clientKey: clientIp }); // 1. send `message` to the wallet
 const login   = await service.verifyLogin({ message, signature }); // 2. wallet signed it (personal_sign)
 const session = service.issueSession(login);                       // 3. short-lived bearer token
 await service.requireAccess({ token: session.token, planId: 1n }); // 4. on every protected request
@@ -118,13 +118,19 @@ await service.requireAccess({ token: session.token, planId: 1n }); // 4. on ever
 
 **Signatures.** EOAs: EIP-191 `personal_sign`, recovered with `ethers.verifyMessage` and compared with the address after `getAddress` normalization. Smart-contract wallets: ERC-1271 `isValidSignature(bytes32,bytes)` against the EIP-191 hash of the message, only if you pass a `contractSignatureVerifier`; it is tested against a mock wallet in `contracts/test/Erc1271Wallet.sol`. Not supported: ERC-6492 (wallets that are not deployed yet), and wallets whose ERC-1271 check expects a differently wrapped hash (for example Safe's message hash) need their own verifier. ERC-1271 answers depend on chain state, so the same signature can be valid at one time and not another.
 
+**The ERC-1271 path calls untrusted code.** `createChallenge` accepts any address from an anonymous caller, so the contract that `verifyLogin` calls is chosen by the attacker. The verifier bounds what one request can cost: a gas limit on the `eth_call` (default 300,000), a timeout (default 3 s, `VERIFIER_UNAVAILABLE` on expiry), at most 8 calls outstanding at once (a timed-out call keeps its slot until the provider really finishes it), and any result that is not exactly one 32-byte word is rejected before decoding. Reverts, out-of-gas and bad answers count as an invalid signature (tested with a contract that burns all its gas, one that returns 4 KiB, and one that reverts). What these bounds cannot guarantee: a node still executes the hostile call up to the gas limit, so every request can cost the node that much CPU; `provider.call` takes no abort signal, so a timed-out request keeps running until the provider's own timeout; and the provider API has no response-size limit, so an oversized answer has already been transferred when it is rejected. Rate limiting in front of `createChallenge` and `verifyLogin` is still required.
+
 **Sessions.** `base64url(claims).base64url(HMAC-SHA256(secret, prefix + base64url(claims)))`, compared with `crypto.timingSafeEqual`. The secret is injected and must be at least 32 bytes; there is no default. Claims: address, chain id, issued-at, expiry (default 15 minutes), random id. Tokens only say who signed in. Whether that wallet currently has access is read from the contract on every `requireAccess` call. Tokens cannot be revoked individually, so keep them short-lived.
 
-**`requireAccess`** verifies the token, then calls the injected `AccessReader`. `ContractAccessReader` implements it over any ethers provider with the single `hasAccess(address,uint256)` function and is checked against the compiled ABI in a test. If the reader throws (RPC down, no contract at the address) the result is `ACCESS_CHECK_FAILED`, never access.
+**`requireAccess`** verifies the token, then calls the injected `AccessReader`. `ContractAccessReader` implements it over an ethers provider with the single `hasAccess(address,uint256)` function and is checked against the compiled ABI in a test. If the reader throws (RPC down, no contract at the address, wrong chain) the result is `ACCESS_CHECK_FAILED`, never access.
 
-**Errors.** Everything throws `AuthError` with a `code`. A possible HTTP mapping (not implemented here): malformed input (`MALFORMED_MESSAGE`, `TOKEN_MALFORMED`, `INVALID_*`) 400; failed checks (`DOMAIN_MISMATCH`, `NONCE_UNKNOWN`, `INVALID_SIGNATURE`, `TOKEN_EXPIRED`, `TOKEN_INVALID_SIGNATURE`, ...) 401; `ACCESS_DENIED` 403; `ACCESS_CHECK_FAILED` and `STORE_FULL` 503.
+**Chain binding.** Sessions and login messages carry `config.chainId`, so the reader and the verifier take the same `chainId` and, on first use, check that the provider reports it (`CHAIN_ID_MISMATCH` otherwise; it is checked again on the next call after a failure). This catches a misconfigured endpoint, for example a testnet URL behind a mainnet config. It is not a defense against a malicious RPC endpoint, which can report any chain id and any `hasAccess` result: the RPC is a trusted component.
 
-**Not included.** HTTP routes, cookies, CORS, rate limiting, a persistent or shared nonce store (`InMemoryNonceStore` is single-process and bounded; a multi-instance deployment needs an atomic `consume` on Redis or a database), reorg handling (`ContractAccessReader` reads the latest block; a service that sells high-value access might wait for confirmations), and key rotation for the session secret.
+**Challenge limits.** `InMemoryNonceStore` limits live challenges per address (default 5), per client key (default 20, only for challenges created with `{ clientKey }`, typically the client IP) and in total (default 10,000), and prunes expired ones before it reports a limit (`TOO_MANY_CHALLENGES`, `STORE_FULL`). One wallet or one client cannot use up the store. A client that varies both the address (any address is accepted) and its IP can still fill the total, which blocks new logins until challenges expire (5 minutes by default), so a real rate limiter in front of `createChallenge` is still needed.
+
+**Errors.** Everything throws `AuthError` with a `code`. A possible HTTP mapping (not implemented here): malformed input (`MALFORMED_MESSAGE`, `TOKEN_MALFORMED`, `INVALID_*`) 400; failed checks (`DOMAIN_MISMATCH`, `NONCE_UNKNOWN`, `INVALID_SIGNATURE`, `TOKEN_EXPIRED`, `TOKEN_INVALID_SIGNATURE`, ...) 401; `ACCESS_DENIED` 403; `TOO_MANY_CHALLENGES` 429; `ACCESS_CHECK_FAILED`, `VERIFIER_UNAVAILABLE` and `STORE_FULL` 503.
+
+**Not included.** HTTP routes, cookies, CORS, rate limiting (only the store quotas above), a persistent or shared nonce store (`InMemoryNonceStore` is single-process and bounded; a multi-instance deployment needs an atomic `consume` and the same quotas on Redis or a database), reorg handling (`ContractAccessReader` reads the latest block; a service that sells high-value access might wait for confirmations), and key rotation for the session secret.
 
 ## Frontend integration
 
@@ -176,9 +182,9 @@ operator:  0x70997970C51812dc3A010C7d01b50e0d17dc79C8
 == backend: wire the auth service to the contract
 auth service ready (chain id 31337, domain app.example.com)
 
-== alice buys plan 1, paying 0.015 ETH (0.005 ETH is refunded)
-gas used:  131073
-expiry:    2026-11-30T01:52:26.000Z
+== alice buys plan 1: she quotes 0.01 ETH as her maximum price and sends 0.015 ETH (0.005 ETH is refunded)
+gas used:  131246
+expiry:    2026-11-30T02:10:18.000Z
 contract balance: 0.01 ETH
 
 == alice signs in: the backend issues a challenge, the wallet signs it
@@ -190,12 +196,12 @@ Sign in to Example. This does not cost gas.
 URI: https://app.example.com
 Version: 1
 Chain ID: 31337
-Nonce: 54f02e96f71fb6d9e9565acf3a1ad9f3
-Issued At: 2026-10-31T01:52:23.000Z
-Expiration Time: 2026-10-31T01:57:23.000Z
-signature: 0xcfed06414bb56691afd9...
+Nonce: 5a1de7e002d7271eec58fa3f01fcc16f
+Issued At: 2026-10-31T02:10:15.000Z
+Expiration Time: 2026-10-31T02:15:15.000Z
+signature: 0x29aed84625712205964b...
 verified:  0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC via eoa
-token:     eyJ2IjoxLCJzdWIiOiIweDNDNDRDZERk... (expires 2026-10-31T02:07:23.000Z)
+token:     eyJ2IjoxLCJzdWIiOiIweDNDNDRDZERk... (expires 2026-10-31T02:25:15.000Z)
 
 == replaying the same signed message is rejected
 second verifyLogin with the same nonce: NONCE_UNKNOWN
@@ -211,7 +217,7 @@ bob, plan 1: ACCESS_DENIED
 alice, plan 1: ACCESS_DENIED
 
 == alice renews; access returns without signing in again
-new expiry: 2026-12-31T01:52:27.000Z
+new expiry: 2026-12-31T02:10:19.000Z
 alice, plan 1: access granted
 
 == the operator revokes alice's access
@@ -223,32 +229,33 @@ withdrawn: 0.02 ETH, accrued revenue now 0
 
 ## Tests
 
-`npm test` runs 159 tests (Mocha, TypeScript, Hardhat in-process network). The same count passes on Node 22.22 and Node 24.14 after a clean `npm ci --ignore-scripts`, with networking disabled for the test run.
+`npm test` runs 193 tests (Mocha, TypeScript, Hardhat in-process network). The same count passes on Node 22.22 and Node 24.14 after a clean `npm ci --ignore-scripts`, with networking disabled for the test run.
 
 | Area | File | Tests |
 | --- | --- | --- |
 | Plan lifecycle, price and active flag, access-control reverts, error selectors | `test/registry/plans.test.ts` | 15 |
-| Purchase, renewal math at the second boundaries, overpayment refund, pause | `test/registry/purchase.test.ts` | 16 |
+| Purchase, `maxPrice` race, renewal math at the second boundaries, overpayment refund, pause | `test/registry/purchase.test.ts` | 21 |
 | Grant and revoke, bounded reasons, role administration, two-step admin transfer | `test/registry/operators.test.ts` | 16 |
 | Max concurrent holders, slot release, bounded batches | `test/registry/capacity.test.ts` | 12 |
 | Withdrawals and accounting (`balance == paid - refunded - withdrawn`), forced ETH | `test/registry/withdraw.test.ts` | 8 |
 | Reentrancy attacks on the refund path and the withdraw path | `test/registry/reentrancy.test.ts` | 7 |
 | Randomized comparison with a reference model (3 seeds x 250 operations) | `test/registry/invariants.test.ts` | 4 |
 | EIP-4361 format and strict parsing | `test/auth/siwe.test.ts` | 15 |
-| Nonce store | `test/auth/nonceStore.test.ts` | 6 |
+| Nonce store, including per-address, per-client and total limits | `test/auth/nonceStore.test.ts` | 13 |
 | Session tokens | `test/auth/session.test.ts` | 12 |
-| Login, sessions and access checks with a fake reader (replay, expiry, wrong domain, URI or chain id, tampering, wrong signer, ...) | `test/auth/service.test.ts` | 33 |
-| Purchase -> login -> access, expiry, revocation, grants, ERC-1271 against the deployed contract | `test/auth/e2e.test.ts` | 15 |
+| Login, sessions and access checks with a fake reader (replay, expiry, wrong domain, URI or chain id, tampering, wrong signer, challenge quotas, ...) | `test/auth/service.test.ts` | 36 |
+| ERC-1271 verifier bounds (gas limit, timeout, outstanding-call limit, result size) and the chain guard, with a scripted provider | `test/auth/erc1271.test.ts` | 13 |
+| Purchase -> login -> access, expiry, revocation, grants, ERC-1271, hostile wallets and chain binding against the deployed contract | `test/auth/e2e.test.ts` | 21 |
 
-What the contract tests assert, concretely: custom errors and their arguments (and, in a few tests, the raw 4-byte selectors); events and their arguments; purchase and renewal expiry arithmetic including renewal one second before, exactly at, and after expiry; the refund and withdrawal accounting identity after every step of a mixed sequence; that a contract buyer or treasury that re-enters `purchase` from its `receive` function is stopped by the guard with `ReentrancyGuardReentrantCall`, and that the outer call either completes once or reverts whole, depending on whether the attacker swallows the inner failure.
+What the contract tests assert, concretely: custom errors and their arguments (and, in a few tests, the raw 4-byte selectors); events and their arguments; purchase and renewal expiry arithmetic including renewal one second before, exactly at, and after expiry; that a price increase mined before a purchase makes it revert with `PriceAboveMax` while exact-price buyers and price drops still work; the refund and withdrawal accounting identity after every step of a mixed sequence; that a contract buyer or treasury that re-enters `purchase` from its `receive` function is stopped by the guard with `ReentrancyGuardReentrantCall`, and that the outer call either completes once or reverts whole, depending on whether the attacker swallows the inner failure.
 
 The randomized test uses a seeded PRNG (mulberry32, seeds 11, 2024 and 90210), so a failure can be replayed. After every operation it compares plans, expiries, slots, revenue totals and the contract balance with a TypeScript model. Across the three seeds it performed these operations (printed by the test):
 
 ```
-grant ok=70, revoke reverts: nothing=37, active change=20, price change=28, purchase ok=64,
-purchase ok, refunded=65, purchase reverts: full=36, revoke ok=42, time warp=73, withdraw ok=59,
-purchase reverts: inactive=21, release freed a slot=24, grant reverts: full=10, pause toggle=26,
-purchase reverts: paused=117, withdraw reverts: too much=4
+grant ok=70, revoke reverts: nothing=42, active change=28, price change=40, purchase ok=23,
+purchase ok, refunded=38, withdraw reverts: too much=6, purchase reverts: full=20, time warp=65,
+grant reverts: full=5, pause toggle=27, purchase reverts: paused=180, revoke ok=39, withdraw ok=57,
+release freed a slot=19, purchase reverts: inactive=27, purchase reverts: above max=12
 ```
 
 ### Coverage
@@ -262,11 +269,12 @@ purchase reverts: paused=117, withdraw reverts: too much=4
 ║ File Path                         │ Line % │ Statement % │ Uncovered Lines ║
 ╟───────────────────────────────────┼────────┼─────────────┼─────────────────╢
 ║ contracts/test/Erc1271Wallet.sol  │ 87.50  │ 90.00       │ 19              ║
+║ contracts/test/HostileWallet.sol  │ 100.00 │ 100.00      │ -               ║
 ║ contracts/AccessRegistry.sol      │ 100.00 │ 100.00      │ -               ║
 ║ contracts/test/AccessProbe.sol    │ 100.00 │ 100.00      │ -               ║
 ║ contracts/test/ReentrantBuyer.sol │ 94.12  │ 94.44       │ 44              ║
 ╟───────────────────────────────────┼────────┼─────────────┼─────────────────╢
-║ Total                             │ 98.21  │ 98.48       │                 ║
+║ Total                             │ 98.33  │ 98.61       │                 ║
 ╚═══════════════════════════════════╧════════╧═════════════╧═════════════════╝
 ```
 
@@ -278,17 +286,17 @@ Line and statement coverage only; the report has no branch figures. 100% line co
 
 ```
 ║ Function name              │ Min     │ Average │ Median  │ Max     │ #calls       ║
-║ createPlan                 │ 71646   │ 71680   │ 71664   │ 72030   │ 24           ║
-║ grant                      │ 36891   │ 52925   │ 47040   │ 80537   │ 82           ║
-║ grantRole                  │ 51606   │ 51617   │ 51618   │ 51618   │ 9            ║
-║ pause                      │ 47044   │ 47044   │ 47044   │ 47044   │ 17           ║
-║ purchase                   │ 49224   │ 78007   │ 66324   │ 131073  │ 203          ║
-║ releaseExpired             │ 27327   │ 36372   │ 34135   │ 171191  │ 83           ║
-║ revoke                     │ 33541   │ 34430   │ 33565   │ 36721   │ 50           ║
-║ setPlanActive              │ 28098   │ 29377   │ 28098   │ 30898   │ 24           ║
-║ setPlanPrice               │ 30303   │ 32450   │ 33103   │ 33115   │ 30           ║
-║ unpause                    │ 25166   │ 25166   │ 25166   │ 25166   │ 14           ║
-║ withdrawTo                 │ 48443   │ 51577   │ 48467   │ 122653  │ 67           ║
+║ createPlan                 │ 71646   │ 71688   │ 71670   │ 72030   │ 17           ║
+║ grant                      │ 37367   │ 52602   │ 54467   │ 80559   │ 75           ║
+║ grantRole                  │ 51618   │ 51618   │ 51618   │ 51618   │ 3            ║
+║ pause                      │ 47066   │ 47066   │ 47066   │ 47066   │ 15           ║
+║ purchase                   │ 49397   │ 86557   │ 92565   │ 126765  │ 94           ║
+║ releaseExpired             │ 27349   │ 35913   │ 34151   │ 171153  │ 76           ║
+║ revoke                     │ 33575   │ 34900   │ 35919   │ 35996   │ 41           ║
+║ setPlanActive              │ 28108   │ 29715   │ 30908   │ 30920   │ 28           ║
+║ setPlanPrice               │ 30325   │ 32635   │ 33125   │ 33125   │ 40           ║
+║ unpause                    │ 25166   │ 25166   │ 25166   │ 25166   │ 13           ║
+║ withdrawTo                 │ 48443   │ 49361   │ 48467   │ 65555   │ 57           ║
 ║ Deployment                 │ 2131354 │ 2131354 │ 2131354 │ 2131354 │ 8            ║
 ```
 
@@ -307,10 +315,12 @@ The call counts include the randomized test, so they are not a profile of typica
 - The randomized test compares the contract with a reference model I wrote, so it finds divergence from my understanding of the rules, not flaws in the rules themselves.
 - Administrators are trusted: the admin can pause purchases, change prices, deactivate plans and withdraw all revenue, and operators can grant and revoke any access. The only delay is on changing the admin account.
 - `block.timestamp` can be nudged by block producers by a few seconds, so second-level boundaries are only exact in the simulated network.
-- A revoked buyer is not refunded. Slots of capped plans are freed lazily (see Capacity).
+- A revoked buyer is not refunded. Slots of capped plans are freed lazily (see Capacity), and paying holders can take every slot of a capped plan.
 - Hardhat's coverage report covers the Solidity code only (lines and statements, no branch figures); the TypeScript in `src/auth` is tested but its coverage was not measured.
 - Gas numbers are from the simulated network with the optimizer at 200 runs; real networks and L2 fee models differ.
 - The browser snippet was not run in a browser.
+- The ERC-1271 path and challenge issuance are bounded, not rate limited: a hostile wallet still costs the RPC node up to the gas limit per request, a timed-out RPC call is not cancelled, and a client that varies addresses and IPs can still fill the nonce store (see Backend). Put a rate limiter in front of both.
+- The chain check on the reader and verifier detects a misconfigured endpoint, not a malicious one; the RPC endpoint is trusted.
 
 ## License
 

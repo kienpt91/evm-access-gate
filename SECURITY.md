@@ -8,6 +8,15 @@ This repository is an educational example. The contracts have not been audited, 
 
 Please use GitHub's private vulnerability reporting for this repository (Security tab, "Report a vulnerability"), or email kienphan.dev@gmail.com. Do not open public issues for vulnerabilities. This is a hobby-scale example project, so there is no bounty and no response-time guarantee, but reports are read.
 
+## Known limits that are by design
+
+- **Admin powers.** The contract admin can change prices, deactivate plans, pause purchases and withdraw all accrued revenue, and operators can grant and revoke any access. Only a change of the admin account is delayed. `purchase(planId, maxPrice)` protects a buyer from a price increase mined before their transaction, but not from a price they already agreed to.
+- **Capped plans.** Paying holders can take every slot of a capped plan, and slots of expired holders stay taken until `releaseExpired` is called for them.
+- **ERC-1271 verification calls untrusted code.** `createChallenge` accepts any address, so `verifyLogin` can be made to call a hostile contract. The verifier limits the call (gas limit, timeout, at most 8 outstanding calls, 32-byte result only) but cannot cancel an in-flight provider request, cannot stop a node from executing the call up to the gas limit, and cannot limit the size of a response. Rate limiting in front of `createChallenge` and `verifyLogin` is required before exposing the module.
+- **Challenge flooding.** `InMemoryNonceStore` limits live challenges per address, per client key and in total. A client that varies addresses and IPs can still fill the total (10,000 by default) and block new logins until the challenges expire.
+- **The RPC endpoint is trusted.** The reader and verifier check that the provider reports the configured chain id, which catches a misconfigured endpoint. A malicious endpoint can report any chain id and any `hasAccess` result.
+- **Sessions** are bearer tokens that cannot be revoked individually; they are short-lived (15 minutes by default) and on-chain access is re-read on every request.
+
 ## Dependency policy
 
 - Every dependency version, direct and transitive, was installed with `npm install --before=<cutoff> --ignore-scripts --save-exact`, where the cutoff is 7 days before the change (currently 2026-10-24T00:00:00Z). A version published inside that window is not used, even when it carries an advisory fix.
