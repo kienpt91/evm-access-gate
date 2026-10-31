@@ -19,9 +19,12 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 ///      - `OPERATOR_ROLE`: grants and revokes access without payment.
 ///
 ///      Payment rules
-///      - `purchase` accepts `msg.value >= price`. The overpayment is refunded to the buyer in the
+///      - `purchase(planId, maxPrice)` reverts with `PriceAboveMax` if the live price is above
+///        `maxPrice`, so a price increase mined before the buyer's transaction cannot cost more than
+///        the buyer agreed to. It then accepts `msg.value >= price`; the overpayment (for example
+///        when `msg.value == maxPrice` and the price has dropped) is refunded to the buyer in the
 ///        same transaction (the only push payment in the contract). If the refund fails, the whole
-///        purchase reverts. A buyer that cannot receive ETH must pay the exact price.
+///        purchase reverts. A buyer that cannot receive ETH must send exactly the price.
 ///      - Revenue is only accounted, never forwarded. The admin pulls it with `withdrawTo`.
 ///      - The contract has no `receive` or `fallback`, so plain transfers revert. ETH can still be
 ///        forced into any contract (for example by a self-destructing contract); such ETH is not
@@ -102,6 +105,7 @@ contract AccessRegistry is AccessControlDefaultAdminRules, Pausable, ReentrancyG
     error PlanInactive(uint256 planId);
     error PlanFull(uint256 planId, uint32 maxHolders);
     error InsufficientPayment(uint256 sent, uint256 required);
+    error PriceAboveMax(uint256 price, uint256 maxPrice);
     error RefundFailed(address buyer, uint256 amount);
     error ReasonTooLong(uint256 length, uint256 maxLength);
     error NothingToRevoke(address user, uint256 planId);
@@ -192,12 +196,15 @@ contract AccessRegistry is AccessControlDefaultAdminRules, Pausable, ReentrancyG
     // ------------------------------------------------------------------
 
     /// @notice Buy or extend access to `planId` for the caller.
-    ///         Sending more than the price refunds the difference to the caller.
-    function purchase(uint256 planId) external payable whenNotPaused nonReentrant {
+    /// @param maxPrice The highest price the caller agrees to pay. Reverts with `PriceAboveMax` if
+    ///        the plan costs more when the transaction is mined. Sending `msg.value` above the
+    ///        actual price refunds the difference to the caller.
+    function purchase(uint256 planId, uint256 maxPrice) external payable whenNotPaused nonReentrant {
         Plan storage plan = _plan(planId);
         if (!plan.active) revert PlanInactive(planId);
 
         uint256 price = plan.price;
+        if (price > maxPrice) revert PriceAboveMax(price, maxPrice);
         if (msg.value < price) revert InsufficientPayment(msg.value, price);
 
         uint64 newExpiry = _extend(planId, plan, msg.sender, plan.duration);

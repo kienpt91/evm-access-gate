@@ -97,7 +97,9 @@ describe("AccessRegistry randomized invariants", () => {
         const planId = prng.pick(PLAN_IDS);
         const plan = model.plan(planId);
         const extra = prng.pick([0n, 0n, 1n, 12_345n, BASE_PRICE]);
-        const send = () => registry.connect(user).purchase(planId, { value: plan.price + extra });
+        // One purchase in ten quotes a price one wei too low, as if the price rose after signing.
+        const quoted = prng.next() < 0.1 ? plan.price - 1n : plan.price;
+        const send = () => registry.connect(user).purchase(planId, quoted, { value: plan.price + extra });
 
         if (model.paused) {
           count("purchase reverts: paused");
@@ -107,6 +109,13 @@ describe("AccessRegistry randomized invariants", () => {
         if (!plan.active) {
           count("purchase reverts: inactive");
           await expect(send()).to.be.revertedWithCustomError(registry, "PlanInactive");
+          return;
+        }
+        if (quoted < plan.price) {
+          count("purchase reverts: above max");
+          await expect(send())
+            .to.be.revertedWithCustomError(registry, "PriceAboveMax")
+            .withArgs(plan.price, quoted);
           return;
         }
         const key = Model.key(planId, user.address);
@@ -289,6 +298,7 @@ describe("AccessRegistry randomized invariants", () => {
       "purchase reverts: full",
       "purchase reverts: paused",
       "purchase reverts: inactive",
+      "purchase reverts: above max",
       "grant ok",
       "revoke ok",
       "release freed a slot",

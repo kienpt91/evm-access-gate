@@ -89,20 +89,20 @@ describe("AccessRegistry plans", () => {
     await expect(registry.connect(admin).setPlanActive(1n, false))
       .to.emit(registry, "PlanActiveChanged")
       .withArgs(1n, false);
-    await expect(registry.connect(alice).purchase(1n, { value: PRICE }))
+    await expect(registry.connect(alice).purchase(1n, PRICE, { value: PRICE }))
       .to.be.revertedWithCustomError(registry, "PlanInactive")
       .withArgs(1n);
 
     await expect(registry.connect(admin).setPlanActive(1n, true))
       .to.emit(registry, "PlanActiveChanged")
       .withArgs(1n, true);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(true);
   });
 
   it("deactivating a plan does not remove access that was already bought", async () => {
     const { registry, admin, alice } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await registry.connect(admin).setPlanActive(1n, false);
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(true);
   });
@@ -122,7 +122,7 @@ describe("AccessRegistry plans", () => {
   it("a price change does not touch time that was already bought", async () => {
     const { registry, admin, alice, bob } = await loadFixture(deployWithPlan);
     const t = (await latest()) + 100n;
-    await sendAt(t, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
     const expiryBefore = await registry.expiryOf(alice.address, 1n);
     expect(expiryBefore).to.equal(t + DURATION);
 
@@ -130,11 +130,11 @@ describe("AccessRegistry plans", () => {
 
     expect(await registry.expiryOf(alice.address, 1n)).to.equal(expiryBefore);
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(true);
-    // New purchases pay the new price.
-    await expect(registry.connect(bob).purchase(1n, { value: PRICE }))
-      .to.be.revertedWithCustomError(registry, "InsufficientPayment")
-      .withArgs(PRICE, PRICE * 10n);
-    await registry.connect(bob).purchase(1n, { value: PRICE * 10n });
+    // New purchases pay the new price; a buyer who only agreed to the old one is turned away.
+    await expect(registry.connect(bob).purchase(1n, PRICE, { value: PRICE * 10n }))
+      .to.be.revertedWithCustomError(registry, "PriceAboveMax")
+      .withArgs(PRICE * 10n, PRICE);
+    await registry.connect(bob).purchase(1n, PRICE * 10n, { value: PRICE * 10n });
   });
 
   it("plan management and price changes are admin only", async () => {
@@ -158,7 +158,7 @@ describe("AccessRegistry plans", () => {
     await expect(registry.connect(admin).setPlanPrice(99n, PRICE))
       .to.be.revertedWithCustomError(registry, "PlanNotFound")
       .withArgs(99n);
-    await expect(registry.connect(alice).purchase(99n, { value: PRICE }))
+    await expect(registry.connect(alice).purchase(99n, PRICE, { value: PRICE }))
       .to.be.revertedWithCustomError(registry, "PlanNotFound")
       .withArgs(99n);
     expect(await registry.hasAccess(alice.address, 99n)).to.equal(false);
@@ -180,11 +180,14 @@ describe("AccessRegistry plans", () => {
       selector("AccessControlUnauthorizedAccount"),
     );
     expect(await revertSelector(registry.getPlan.staticCall(99n))).to.equal(selector("PlanNotFound"));
-    expect(await revertSelector(registry.connect(alice).purchase.staticCall(99n, { value: PRICE }))).to.equal(
+    expect(await revertSelector(registry.connect(alice).purchase.staticCall(99n, PRICE, { value: PRICE }))).to.equal(
       selector("PlanNotFound"),
     );
-    expect(await revertSelector(registry.connect(alice).purchase.staticCall(1n, { value: PRICE - 1n }))).to.equal(
+    expect(await revertSelector(registry.connect(alice).purchase.staticCall(1n, PRICE, { value: PRICE - 1n }))).to.equal(
       selector("InsufficientPayment"),
+    );
+    expect(await revertSelector(registry.connect(alice).purchase.staticCall(1n, PRICE - 1n, { value: PRICE }))).to.equal(
+      selector("PriceAboveMax"),
     );
   });
 });

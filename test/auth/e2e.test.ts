@@ -53,7 +53,7 @@ async function signIn(service: AuthService, signer: Signer): Promise<string> {
 describe("end to end: wallet login and on-chain access", () => {
   it("purchase -> login -> access granted", async () => {
     const { registry, alice, service } = await loadFixture(deployStack);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
 
     const token = await signIn(service, alice);
     const grant = await service.requireAccess({ token, planId: 1n });
@@ -69,7 +69,7 @@ describe("end to end: wallet login and on-chain access", () => {
 
   it("access is per plan: a plan 1 purchase does not open plan 2", async () => {
     const { registry, alice, service } = await loadFixture(deployStack);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     const token = await signIn(service, alice);
 
     await service.requireAccess({ token, planId: 1n });
@@ -79,14 +79,14 @@ describe("end to end: wallet login and on-chain access", () => {
 
   it("access is per wallet: another wallet's session does not inherit it", async () => {
     const { registry, alice, bob, service } = await loadFixture(deployStack);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     const bobToken = await signIn(service, bob);
     await expectAuthError(() => service.requireAccess({ token: bobToken, planId: 1n }), "ACCESS_DENIED");
   });
 
   it("expired -> denied, even though the session token is still valid", async () => {
     const { registry, alice, service } = await loadFixture(deployStack);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     const token = await signIn(service, alice);
 
     await networkHelpers.time.increase(DURATION - HOUR);
@@ -98,18 +98,18 @@ describe("end to end: wallet login and on-chain access", () => {
 
   it("renewing after expiry brings access back on the same session", async () => {
     const { registry, alice, service } = await loadFixture(deployStack);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     const token = await signIn(service, alice);
     await networkHelpers.time.increase(DURATION + DAY);
     await expectAuthError(() => service.requireAccess({ token, planId: 1n }), "ACCESS_DENIED");
 
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await service.requireAccess({ token, planId: 1n });
   });
 
   it("revoked -> denied on the next request", async () => {
     const { registry, operator, alice, service } = await loadFixture(deployStack);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     const token = await signIn(service, alice);
     await service.requireAccess({ token, planId: 1n });
 
@@ -130,7 +130,7 @@ describe("end to end: wallet login and on-chain access", () => {
 
   it("a paused registry still answers hasAccess for existing holders", async () => {
     const { registry, admin, alice, service } = await loadFixture(deployStack);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await registry.connect(admin).pause();
     const token = await signIn(service, alice);
     await service.requireAccess({ token, planId: 1n });

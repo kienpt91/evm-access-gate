@@ -12,7 +12,7 @@ const { loadFixture } = networkHelpers;
 describe("AccessRegistry revenue and withdrawals", () => {
   it("withdrawTo sends the amount, updates accounting and emits Withdrawn", async () => {
     const { registry, admin, alice, treasury } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
 
     await expect(registry.connect(admin).withdrawTo(treasury.address, PRICE / 4n))
       .to.emit(registry, "Withdrawn")
@@ -25,7 +25,7 @@ describe("AccessRegistry revenue and withdrawals", () => {
 
   it("moves ETH from the contract to the chosen address, not to the admin", async () => {
     const { registry, admin, alice, treasury } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await expect(registry.connect(admin).withdrawTo(treasury.address, PRICE)).to.changeEtherBalances(
       ethers,
       [registry, treasury, admin],
@@ -35,7 +35,7 @@ describe("AccessRegistry revenue and withdrawals", () => {
 
   it("can withdraw everything, then rejects any further amount", async () => {
     const { registry, admin, alice, treasury } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await registry.connect(admin).withdrawTo(treasury.address, PRICE);
 
     expect(await registry.accruedRevenue()).to.equal(0n);
@@ -46,7 +46,7 @@ describe("AccessRegistry revenue and withdrawals", () => {
 
   it("rejects an amount above the accrued revenue, a zero amount and the zero address", async () => {
     const { registry, admin, alice, treasury } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
 
     await expect(registry.connect(admin).withdrawTo(treasury.address, PRICE + 1n))
       .to.be.revertedWithCustomError(registry, "InsufficientRevenue")
@@ -64,7 +64,7 @@ describe("AccessRegistry revenue and withdrawals", () => {
 
   it("only the default admin can withdraw", async () => {
     const { registry, operator, alice, treasury } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     for (const caller of [operator, alice, treasury]) {
       await expect(registry.connect(caller).withdrawTo(caller.address, PRICE))
         .to.be.revertedWithCustomError(registry, "AccessControlUnauthorizedAccount")
@@ -80,7 +80,7 @@ describe("AccessRegistry revenue and withdrawals", () => {
     let withdrawn = 0n;
 
     const buy = async (buyer: typeof alice, extra: bigint) => {
-      await registry.connect(buyer).purchase(1n, { value: PRICE + extra });
+      await registry.connect(buyer).purchase(1n, PRICE, { value: PRICE + extra });
       paid += PRICE + extra;
       refunded += extra;
     };
@@ -111,7 +111,7 @@ describe("AccessRegistry revenue and withdrawals", () => {
   it("ETH forced into the contract is not accounted and cannot be withdrawn", async () => {
     const { registry, admin, alice, treasury } = await loadFixture(deployWithPlan);
     const registryAddress = await registry.getAddress();
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
 
     // Same effect as a self-destructing contract sending ETH here.
     const forced = ethers.parseEther("5");
@@ -127,7 +127,7 @@ describe("AccessRegistry revenue and withdrawals", () => {
 
   it("a withdrawal to a receiver that rejects ETH reverts and leaves accounting unchanged", async () => {
     const { registry, admin, alice } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     const rejecting = await ethers.deployContract("ReentrantBuyer", [await registry.getAddress(), 1n]);
     await rejecting.setMode(1); // Reject
 

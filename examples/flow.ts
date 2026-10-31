@@ -61,8 +61,8 @@ const service: AuthService = createAuthService(
 );
 console.log("auth service ready (chain id 31337, domain app.example.com)");
 
-step("alice buys plan 1, paying 0.015 ETH (0.005 ETH is refunded)");
-const buyTx = await registry.connect(alice).purchase(PLAN_ID, { value: ethers.parseEther("0.015") });
+step("alice buys plan 1: she quotes 0.01 ETH as her maximum price and sends 0.015 ETH (0.005 ETH is refunded)");
+const buyTx = await registry.connect(alice).purchase(PLAN_ID, PRICE, { value: ethers.parseEther("0.015") });
 const buyReceipt = await buyTx.wait();
 const expiry = await registry.expiryOf(alice.address, PLAN_ID);
 console.log(`gas used:  ${buyReceipt?.gasUsed}`);
@@ -102,7 +102,7 @@ await networkHelpers.time.increase(31n * DAY);
 await attempt("alice, plan 1", () => service.requireAccess({ token: session.token, planId: PLAN_ID }));
 
 step("alice renews; access returns without signing in again");
-await registry.connect(alice).purchase(PLAN_ID, { value: PRICE });
+await registry.connect(alice).purchase(PLAN_ID, PRICE, { value: PRICE });
 console.log(`new expiry: ${iso(await registry.expiryOf(alice.address, PLAN_ID))}`);
 await attempt("alice, plan 1", () => service.requireAccess({ token: session.token, planId: PLAN_ID }));
 

@@ -34,7 +34,7 @@ describe("AccessRegistry operators: grant and revoke", () => {
   it("grant stacks on top of a purchase like a renewal does", async () => {
     const { registry, operator, alice } = await loadFixture(deployWithPlan);
     const t = (await latest()) + 20n;
-    await sendAt(t, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
     await registry.connect(operator).grant(alice.address, 1n, 3n * DAY, "");
     expect(await registry.expiryOf(alice.address, 1n)).to.equal(t + DURATION + 3n * DAY);
   });
@@ -92,7 +92,7 @@ describe("AccessRegistry operators: grant and revoke", () => {
   it("revoke ends access immediately, clears the expiry and emits AccessRevoked", async () => {
     const { registry, operator, alice } = await loadFixture(deployWithPlan);
     const t = (await latest()) + 20n;
-    await sendAt(t, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
 
     await expect(registry.connect(operator).revoke(alice.address, 1n, "chargeback"))
       .to.emit(registry, "AccessRevoked")
@@ -104,7 +104,7 @@ describe("AccessRegistry operators: grant and revoke", () => {
 
   it("revoke does not refund and does not change revenue", async () => {
     const { registry, operator, alice } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await expect(registry.connect(operator).revoke(alice.address, 1n, "abuse")).to.changeEtherBalances(
       ethers,
       [alice, registry],
@@ -120,7 +120,7 @@ describe("AccessRegistry operators: grant and revoke", () => {
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(false);
 
     const t = (await latest()) + 5n;
-    await sendAt(t, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
     expect(await registry.expiryOf(alice.address, 1n)).to.equal(t + DURATION);
   });
 
@@ -136,7 +136,7 @@ describe("AccessRegistry operators: grant and revoke", () => {
 
   it("revoke of an already lapsed holder still clears the record", async () => {
     const { registry, operator, alice } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await networkHelpers.time.increase(DURATION + 1n);
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(false);
     await registry.connect(operator).revoke(alice.address, 1n, "cleanup");

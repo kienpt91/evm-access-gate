@@ -33,8 +33,8 @@ contract ReentrantBuyer {
         mode = mode_;
     }
 
-    function buy(uint256 planId) external payable {
-        registry.purchase{value: msg.value}(planId);
+    function buy(uint256 planId, uint256 maxPrice) external payable {
+        registry.purchase{value: msg.value}(planId, maxPrice);
     }
 
     receive() external payable {
@@ -45,7 +45,7 @@ contract ReentrantBuyer {
 
         // Re-enter with whatever was just received.
         (bool ok, bytes memory data) = address(registry).call{value: msg.value}(
-            abi.encodeCall(AccessRegistry.purchase, (targetPlan))
+            abi.encodeCall(AccessRegistry.purchase, (targetPlan, msg.value))
         );
         reenterSucceeded = ok;
         if (!ok) {

@@ -31,7 +31,7 @@ describe("AccessRegistry reentrancy", () => {
     const t = (await latest()) + 10n;
     const extra = PRICE * 3n;
 
-    await sendAt(t, () => attacker.buy(1n, { value: PRICE + extra }));
+    await sendAt(t, () => attacker.buy(1n, PRICE, { value: PRICE + extra }));
 
     expect(await attacker.receiveCalls()).to.equal(1n);
     expect(await attacker.reenterSucceeded()).to.equal(false);
@@ -49,7 +49,7 @@ describe("AccessRegistry reentrancy", () => {
     await attacker.setMode(Mode.ReenterPurchase);
     const extra = PRICE * 2n;
 
-    await expect(attacker.buy(1n, { value: PRICE + extra }))
+    await expect(attacker.buy(1n, PRICE, { value: PRICE + extra }))
       .to.be.revertedWithCustomError(registry, "RefundFailed")
       .withArgs(await attacker.getAddress(), extra);
 
@@ -63,7 +63,7 @@ describe("AccessRegistry reentrancy", () => {
     const { registry, attacker } = await loadFixture(deployAttacker);
     await attacker.setMode(Mode.ReenterPurchase);
 
-    await attacker.buy(1n, { value: PRICE });
+    await attacker.buy(1n, PRICE, { value: PRICE });
 
     expect(await attacker.receiveCalls()).to.equal(0n);
     expect(await registry.hasAccess(await attacker.getAddress(), 1n)).to.equal(true);
@@ -73,15 +73,15 @@ describe("AccessRegistry reentrancy", () => {
     const { registry, attacker } = await loadFixture(deployAttacker);
     await attacker.setMode(Mode.Reject);
 
-    await expect(attacker.buy(1n, { value: PRICE + 1n })).to.be.revertedWithCustomError(registry, "RefundFailed");
-    await attacker.buy(1n, { value: PRICE });
+    await expect(attacker.buy(1n, PRICE, { value: PRICE + 1n })).to.be.revertedWithCustomError(registry, "RefundFailed");
+    await attacker.buy(1n, PRICE, { value: PRICE });
     expect(await registry.hasAccess(await attacker.getAddress(), 1n)).to.equal(true);
   });
 
   it("withdraw path: a treasury that re-enters purchase is blocked and the withdrawal completes once", async () => {
     const { registry, admin, alice, attacker } = await loadFixture(deployAttacker);
-    await registry.connect(alice).purchase(1n, { value: PRICE * 2n }); // revenue PRICE, refund to alice
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE * 2n }); // revenue PRICE, refund to alice
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await attacker.setMode(Mode.ReenterPurchaseSwallow);
     const amount = PRICE;
 
@@ -98,7 +98,7 @@ describe("AccessRegistry reentrancy", () => {
 
   it("withdraw path: if the treasury lets the blocked re-entry bubble up, the withdrawal reverts", async () => {
     const { registry, admin, alice, attacker } = await loadFixture(deployAttacker);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await attacker.setMode(Mode.ReenterPurchase);
 
     await expect(registry.connect(admin).withdrawTo(await attacker.getAddress(), PRICE))
@@ -112,12 +112,12 @@ describe("AccessRegistry reentrancy", () => {
   it("the guard resets after a blocked attack: normal purchases keep working", async () => {
     const { registry, alice, attacker } = await loadFixture(deployAttacker);
     await attacker.setMode(Mode.ReenterPurchaseSwallow);
-    await attacker.buy(1n, { value: PRICE * 2n });
+    await attacker.buy(1n, PRICE, { value: PRICE * 2n });
 
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(true);
     await networkHelpers.time.increase(DAY);
-    await attacker.buy(1n, { value: PRICE }); // renewal by the attacker contract itself
+    await attacker.buy(1n, PRICE, { value: PRICE }); // renewal by the attacker contract itself
     expect(await registry.accruedRevenue()).to.equal(PRICE * 3n);
   });
 });

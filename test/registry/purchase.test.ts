@@ -20,7 +20,7 @@ describe("AccessRegistry purchase and renewal", () => {
     const t = (await latest()) + 50n;
 
     await networkHelpers.time.setNextBlockTimestamp(t);
-    await expect(registry.connect(alice).purchase(1n, { value: PRICE }))
+    await expect(registry.connect(alice).purchase(1n, PRICE, { value: PRICE }))
       .to.emit(registry, "Purchased")
       .withArgs(1n, alice.address, PRICE, t + DURATION)
       .and.not.to.emit(registry, "Refunded");
@@ -34,10 +34,10 @@ describe("AccessRegistry purchase and renewal", () => {
 
   it("reverts when the payment is below the price, including zero", async () => {
     const { registry, alice } = await loadFixture(deployWithPlan);
-    await expect(registry.connect(alice).purchase(1n, { value: PRICE - 1n }))
+    await expect(registry.connect(alice).purchase(1n, PRICE, { value: PRICE - 1n }))
       .to.be.revertedWithCustomError(registry, "InsufficientPayment")
       .withArgs(PRICE - 1n, PRICE);
-    await expect(registry.connect(alice).purchase(1n))
+    await expect(registry.connect(alice).purchase(1n, PRICE))
       .to.be.revertedWithCustomError(registry, "InsufficientPayment")
       .withArgs(0n, PRICE);
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(false);
@@ -47,7 +47,7 @@ describe("AccessRegistry purchase and renewal", () => {
     const { registry, alice } = await loadFixture(deployWithPlan);
     const extra = ethers.parseEther("0.5");
 
-    await expect(registry.connect(alice).purchase(1n, { value: PRICE + extra }))
+    await expect(registry.connect(alice).purchase(1n, PRICE, { value: PRICE + extra }))
       .to.emit(registry, "Refunded")
       .withArgs(alice.address, extra);
 
@@ -59,21 +59,76 @@ describe("AccessRegistry purchase and renewal", () => {
   it("moves exactly the price from the buyer to the contract when overpaying", async () => {
     const { registry, alice } = await loadFixture(deployWithPlan);
     const extra = ethers.parseEther("1");
-    await expect(registry.connect(alice).purchase(1n, { value: PRICE + extra })).to.changeEtherBalances(
+    await expect(registry.connect(alice).purchase(1n, PRICE, { value: PRICE + extra })).to.changeEtherBalances(
       ethers,
       [alice, registry],
       [-PRICE, PRICE],
     );
   });
 
+  it("maxPrice closes the price race: a price increase mined first makes the purchase revert", async () => {
+    const { registry, admin, alice } = await loadFixture(deployWithPlan);
+    // Alice quotes the price she saw (PRICE) and rounds her payment up.
+    const quoted = PRICE;
+    const sent = PRICE + PRICE / 2n;
+    // The admin raises the price to exactly what Alice is sending, and that transaction is mined first.
+    await registry.connect(admin).setPlanPrice(1n, sent);
+
+    await expect(registry.connect(alice).purchase(1n, quoted, { value: sent }))
+      .to.be.revertedWithCustomError(registry, "PriceAboveMax")
+      .withArgs(sent, quoted);
+    expect(await registry.hasAccess(alice.address, 1n)).to.equal(false);
+    expect(await registry.accruedRevenue()).to.equal(0n);
+    expect(await ethers.provider.getBalance(await registry.getAddress())).to.equal(0n);
+  });
+
+  it("a buyer who passes a loose bound accepts the higher price", async () => {
+    const { registry, admin, alice } = await loadFixture(deployWithPlan);
+    const sent = PRICE + PRICE / 2n;
+    await registry.connect(admin).setPlanPrice(1n, sent);
+    // A buyer who passes a loose bound (here: everything they sent) accepts the new price.
+    await registry.connect(alice).purchase(1n, sent, { value: sent });
+    expect(await registry.accruedRevenue()).to.equal(sent);
+  });
+
+  it("an exact-price buyer still works, with maxPrice equal to the price and no refund", async () => {
+    const { registry, alice } = await loadFixture(deployWithPlan);
+    await expect(registry.connect(alice).purchase(1n, PRICE, { value: PRICE }))
+      .to.emit(registry, "Purchased")
+      .and.not.to.emit(registry, "Refunded");
+    expect(await registry.hasAccess(alice.address, 1n)).to.equal(true);
+  });
+
+  it("the price may drop between signing and mining: the buyer pays the new price and gets the rest back", async () => {
+    const { registry, admin, alice } = await loadFixture(deployWithPlan);
+    const lower = PRICE / 2n;
+    await registry.connect(admin).setPlanPrice(1n, lower);
+
+    await expect(registry.connect(alice).purchase(1n, PRICE, { value: PRICE }))
+      .to.emit(registry, "Refunded")
+      .withArgs(alice.address, PRICE - lower);
+    expect(await registry.accruedRevenue()).to.equal(lower);
+  });
+
+  it("maxPrice of zero always reverts for an existing plan, and the bound is checked before the payment", async () => {
+    const { registry, alice } = await loadFixture(deployWithPlan);
+    await expect(registry.connect(alice).purchase(1n, 0n, { value: PRICE }))
+      .to.be.revertedWithCustomError(registry, "PriceAboveMax")
+      .withArgs(PRICE, 0n);
+    // Unpaid and over the bound: the bound is reported first.
+    await expect(registry.connect(alice).purchase(1n, PRICE - 1n))
+      .to.be.revertedWithCustomError(registry, "PriceAboveMax")
+      .withArgs(PRICE, PRICE - 1n);
+  });
+
   it("a renewal before expiry adds the duration to the current expiry", async () => {
     const { registry, alice } = await loadFixture(deployWithPlan);
     const t0 = (await latest()) + 10n;
-    await sendAt(t0, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t0, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
     const firstExpiry = t0 + DURATION;
 
     const t1 = t0 + 10n * DAY;
-    await sendAt(t1, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t1, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
 
     expect(await registry.expiryOf(alice.address, 1n)).to.equal(firstExpiry + DURATION);
   });
@@ -81,10 +136,10 @@ describe("AccessRegistry purchase and renewal", () => {
   it("a renewal one second before expiry keeps that last second", async () => {
     const { registry, alice } = await loadFixture(deployWithPlan);
     const t0 = (await latest()) + 10n;
-    await sendAt(t0, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t0, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
     const firstExpiry = t0 + DURATION;
 
-    await sendAt(firstExpiry - 1n, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(firstExpiry - 1n, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
 
     expect(await registry.expiryOf(alice.address, 1n)).to.equal(firstExpiry + DURATION);
   });
@@ -92,10 +147,10 @@ describe("AccessRegistry purchase and renewal", () => {
   it("a renewal at exactly the expiry second starts from that second", async () => {
     const { registry, alice } = await loadFixture(deployWithPlan);
     const t0 = (await latest()) + 10n;
-    await sendAt(t0, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t0, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
     const firstExpiry = t0 + DURATION;
 
-    await sendAt(firstExpiry, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(firstExpiry, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
 
     expect(await registry.expiryOf(alice.address, 1n)).to.equal(firstExpiry + DURATION);
   });
@@ -103,11 +158,11 @@ describe("AccessRegistry purchase and renewal", () => {
   it("a renewal after expiry starts from the renewal time, the gap is not credited", async () => {
     const { registry, alice } = await loadFixture(deployWithPlan);
     const t0 = (await latest()) + 10n;
-    await sendAt(t0, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t0, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
     const firstExpiry = t0 + DURATION;
 
     const t1 = firstExpiry + 5n * DAY;
-    await sendAt(t1, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t1, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
 
     expect(await registry.expiryOf(alice.address, 1n)).to.equal(t1 + DURATION);
   });
@@ -115,7 +170,7 @@ describe("AccessRegistry purchase and renewal", () => {
   it("hasAccess is true up to expiry - 1 and false from the expiry second on", async () => {
     const { registry, alice } = await loadFixture(deployWithPlan);
     const t0 = (await latest()) + 10n;
-    await sendAt(t0, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t0, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
     const expiry = t0 + DURATION;
     const probe = await ethers.deployContract("AccessProbe");
 
@@ -127,7 +182,7 @@ describe("AccessRegistry purchase and renewal", () => {
   it("expiryOf keeps reporting the past expiry after access has lapsed", async () => {
     const { registry, alice } = await loadFixture(deployWithPlan);
     const t0 = (await latest()) + 10n;
-    await sendAt(t0, () => registry.connect(alice).purchase(1n, { value: PRICE }));
+    await sendAt(t0, () => registry.connect(alice).purchase(1n, PRICE, { value: PRICE }));
     await networkHelpers.time.increaseTo(t0 + DURATION + DAY);
 
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(false);
@@ -138,8 +193,8 @@ describe("AccessRegistry purchase and renewal", () => {
     const { registry, admin, alice, bob } = await loadFixture(deployWithPlan);
     await registry.connect(admin).createPlan(2n, PRICE * 2n, 7n * DAY, 0);
 
-    await registry.connect(alice).purchase(1n, { value: PRICE });
-    await registry.connect(bob).purchase(2n, { value: PRICE * 2n });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
+    await registry.connect(bob).purchase(2n, PRICE * 2n, { value: PRICE * 2n });
 
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(true);
     expect(await registry.hasAccess(alice.address, 2n)).to.equal(false);
@@ -149,7 +204,7 @@ describe("AccessRegistry purchase and renewal", () => {
 
   it("buying is always for msg.sender, never for another address", async () => {
     const { registry, alice, bob } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     expect(await registry.expiryOf(bob.address, 1n)).to.equal(0n);
   });
 
@@ -158,19 +213,19 @@ describe("AccessRegistry purchase and renewal", () => {
 
     await expect(registry.connect(admin).pause()).to.emit(registry, "Paused").withArgs(admin.address);
     expect(await registry.paused()).to.equal(true);
-    await expect(registry.connect(alice).purchase(1n, { value: PRICE })).to.be.revertedWithCustomError(
+    await expect(registry.connect(alice).purchase(1n, PRICE, { value: PRICE })).to.be.revertedWithCustomError(
       registry,
       "EnforcedPause",
     );
 
     await expect(registry.connect(admin).unpause()).to.emit(registry, "Unpaused").withArgs(admin.address);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(true);
   });
 
   it("pause keeps existing access valid and keeps operator and admin actions working", async () => {
     const { registry, admin, operator, alice, bob, treasury } = await loadFixture(deployWithPlan);
-    await registry.connect(alice).purchase(1n, { value: PRICE });
+    await registry.connect(alice).purchase(1n, PRICE, { value: PRICE });
     await registry.connect(admin).pause();
 
     expect(await registry.hasAccess(alice.address, 1n)).to.equal(true);
