@@ -322,6 +322,19 @@ The call counts include the randomized test, so they are not a profile of typica
 - The ERC-1271 path and challenge issuance are bounded, not rate limited: a hostile wallet still costs the RPC node up to the gas limit per request, a timed-out RPC call is not cancelled, and a client that varies addresses and IPs can still fill the nonce store (see Backend). Put a rate limiter in front of both.
 - The chain check on the reader and verifier detects a misconfigured endpoint, not a malicious one; the RPC endpoint is trusted.
 
+## Secrets and hooks
+
+Never commit `.env` files or credentials. Keep real values in a local, git-ignored `.env` and commit only a `.env.example` with placeholders.
+
+Install [lefthook](https://github.com/evilmartians/lefthook) and run `lefthook install` once per clone. This enables two hooks (see `lefthook.yml`):
+
+- `pre-commit` runs `sh scripts/secret-scan.sh --staged` and blocks a commit that stages a secret-like file or key.
+- `pre-push` runs `sh scripts/secret-scan.sh --tree` and blocks a push if any tracked file contains one.
+
+CI runs the same scanner over the working tree and the full git history. The scanner is a dependency-free shell script. A finding that is a reviewed, harmless fixture can be allowed by adding a line `<path> <rule>   # reason` to `.secret-scan-allow` (one entry per path and rule, no wildcards), or by putting the marker `secret-scan: allow` on the offending line.
+
+If a secret is ever committed, treat it as compromised: rotate or revoke it first, then remove it from git history and force-push.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
